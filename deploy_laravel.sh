@@ -12,7 +12,7 @@ trap 'log_error "Deployment interrupted! Initiating rollback..."; rollback; exit
 # ----------------------------
 # Config & Defaults
 # ----------------------------
-SCRIPT_REPO="https://raw.githubusercontent.com/username/laravel-ultra-deploy/main/laravel_deploy.sh"
+SCRIPT_REPO="https://raw.githubusercontent.com/nasrulll/laravel-ultra-deploy/main/laravel_deploy.sh"
 SCRIPT_PATH="$(realpath "$0")"
 
 LOG_FILE="/var/log/laravel_ultra_deploy.log"
