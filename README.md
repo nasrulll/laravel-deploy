@@ -60,7 +60,7 @@ This ultra-automated script makes deploying **multiple Laravel apps** on a singl
 ### 1️⃣ Visual / Interactive Mode
 
 ```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/username/laravel-deploy/main/deploy_laravel.sh)"
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/nasrulll/laravel-deploy/main/deploy_laravel.sh)"
 
 ✅ Prompts with emojis
 
