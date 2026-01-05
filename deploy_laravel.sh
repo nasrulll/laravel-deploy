@@ -1,106 +1,224 @@
 #!/bin/bash
 # ==============================================
-# 🚀 Laravel Multi-Domain Deploy Script
-# Version       : 2.0-enhanced
+# 🚀 Laravel Multi-Domain Deploy Script - ENTERPRISE
+# Version       : 3.0-fase1
 # Author        : Nasrul Muiz
-# Description   : Deploy multi Laravel apps from /var/www/
-#                 Self-sufficient (installs curl if missing)
-#                 Supports silent (--silent) & visual mode
+# Description   : Enterprise-grade deployment dengan zero-downtime,
+#                 advanced security, dan automated recovery
 # ==============================================
 
-set -e
+set -euo pipefail
 
 # ----------------------------
-# 🌟 Config & Defaults
+# 🌟 CONFIGURATION
 # ----------------------------
-LOG_FILE="/var/log/laravel_ultra_deploy.log"
-ERROR_LOG_FILE="/var/log/laravel_ultra_deploy_errors.log"
+LOG_FILE="/var/log/laravel_enterprise_deploy.log"
+ERROR_LOG_FILE="/var/log/laravel_enterprise_errors.log"
+DEPLOYMENT_REPORT="/var/log/laravel_deployment_report_$(date +%Y%m%d_%H%M%S).json"
 SILENT_MODE=0
+VERBOSE_MODE=0
+ROLLBACK_ON_ERROR=1
+
+# Directories
 WWW_DIR="/var/www"
 BACKUP_DIR="/var/backups/laravel"
-SCRIPT_REPO="https://raw.githubusercontent.com/nasrulll/laravel-deploy/main/deploy_laravel.sh"
-MAX_BACKUPS=5  # Jumlah maksimum backup yang disimpan
+RELEASES_DIR="/var/releases"
+SCRIPTS_DIR="/usr/local/bin/laravel-deploy"
+
+# Backup Configuration
+MAX_BACKUPS=5
+BACKUP_RETENTION_DAYS=30
+REMOTE_BACKUP_ENABLED=0
+REMOTE_BACKUP_PATH="s3://your-bucket/laravel-backups"
+
+# Deployment Configuration
+ZERO_DOWNTIME_ENABLED=1
+MAINTENANCE_MODE_ENABLED=1
+DEPLOYMENT_TIMEOUT=300
+
+# PHP Configuration
 PHP_VERSIONS=("7.4" "8.0" "8.1" "8.2" "8.3")
+DEFAULT_PHP_VERSION="8.1"
+PHP_OPCACHE_ENABLED=1
+PHP_MEMORY_LIMIT="256M"
+PHP_MAX_EXECUTION_TIME=180
+
+# Security Configuration
+ENABLE_FIREWALL=1
+ENABLE_FAIL2BAN=1
+ENABLE_SECURITY_HEADERS=1
+ENABLE_RATE_LIMITING=1
+RATE_LIMIT_PER_IP=60
+RATE_LIMIT_PER_IP_BURST=120
+
+# Redis Configuration
+REDIS_ENABLED=1
+REDIS_MEMORY="256mb"
+REDIS_MAXMEMORY_POLICY="allkeys-lru"
+
+# Monitoring
+ENABLE_MONITORING=1
+MONITORING_PORT=9100
 
 # ----------------------------
-# 🎯 Detect Arguments
+# 🎯 ARGUMENT PARSING
 # ----------------------------
-for arg in "$@"; do
-    case "$arg" in
-        "--silent") SILENT_MODE=1 ;;
-        "--help"|"-h") show_help; exit 0 ;;
-        "--version"|"-v") echo "Version 2.0-enhanced"; exit 0 ;;
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --silent|-s)
+            SILENT_MODE=1
+            shift
+            ;;
+        --verbose|-v)
+            VERBOSE_MODE=1
+            shift
+            ;;
+        --no-rollback)
+            ROLLBACK_ON_ERROR=0
+            shift
+            ;;
+        --no-zero-downtime)
+            ZERO_DOWNTIME_ENABLED=0
+            shift
+            ;;
+        --backup-only)
+            BACKUP_ONLY=1
+            shift
+            ;;
+        --restore)
+            RESTORE_MODE=1
+            shift
+            ;;
+        --app=*)
+            SPECIFIC_APP="${1#*=}"
+            shift
+            ;;
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        --version)
+            echo "Laravel Enterprise Deploy v3.0-fase1"
+            exit 0
+            ;;
+        *)
+            log_error "Unknown option: $1"
+            show_help
+            exit 1
+            ;;
     esac
 done
 
 # ----------------------------
-# 🖌 Helper Functions
+# 📊 LOGGING FUNCTIONS
 # ----------------------------
-log() { echo -e "$(date '+%F %T') | $1" | tee -a "$LOG_FILE"; }
-log_error() { 
-    echo -e "$(date '+%F %T') | ERROR: $1" | tee -a "$LOG_FILE" >> "$ERROR_LOG_FILE"
-    [[ $SILENT_MODE -eq 0 ]] && echo -e "❌ $1"
-}
-log_warning() { 
-    echo -e "$(date '+%F %T') | WARNING: $1" | tee -a "$LOG_FILE"
-    [[ $SILENT_MODE -eq 0 ]] && echo -e "⚠️  $1"
-}
-log_success() { 
-    echo -e "$(date '+%F %T') | SUCCESS: $1" | tee -a "$LOG_FILE"
-    [[ $SILENT_MODE -eq 0 ]] && echo -e "✅ $1"
-}
-log_info() { 
-    echo -e "$(date '+%F %T') | INFO: $1" | tee -a "$LOG_FILE"
-    [[ $SILENT_MODE -eq 0 ]] && echo -e "ℹ️  $1"
-}
-
-show_help() {
-    cat << EOF
-Usage: $0 [OPTIONS]
-
-Options:
-  --silent, -s    Run in silent mode (no prompts)
-  --help, -h      Show this help message
-  --version, -v   Show script version
-
-Description:
-  Deploy multiple Laravel applications from /var/www/
-  Automatically installs dependencies and configures each app
-EOF
-}
-
-prompt() {
-    local msg="$1"
-    local default="$2"
-    if [[ $SILENT_MODE -eq 1 ]]; then
-        echo "$default"
-    else
-        read -rp "$msg" input
-        echo "${input:-$default}"
+log() {
+    local level="$1"
+    local message="$2"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local log_entry="$timestamp | $level | $message"
+    
+    echo -e "$log_entry" >> "$LOG_FILE"
+    
+    if [[ $VERBOSE_MODE -eq 1 ]] || [[ $level == "ERROR" ]]; then
+        case $level in
+            "SUCCESS") echo -e "✅ $message" ;;
+            "ERROR") echo -e "❌ $message" >&2 ;;
+            "WARNING") echo -e "⚠️  $message" ;;
+            "INFO") echo -e "ℹ️  $message" ;;
+            *) echo -e "📝 $message" ;;
+        esac
     fi
 }
 
-check_cmd() {
-    command -v "$1" >/dev/null 2>&1
+log_info() { log "INFO" "$1"; }
+log_success() { log "SUCCESS" "$1"; }
+log_error() { log "ERROR" "$1"; }
+log_warning() { log "WARNING" "$1"; }
+
+# ----------------------------
+# 🛡️ SECURITY FUNCTIONS
+# ----------------------------
+generate_secure_password() {
+    openssl rand -base64 32 | tr -dc 'a-zA-Z0-9!@#$%^&*()_+-=' | head -c 24
 }
 
 validate_domain() {
     local domain="$1"
-    # Validasi format domain sederhana
-    if [[ ! "$domain" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
-        return 1
+    if [[ "$domain" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}$ ]]; then
+        return 0
     fi
-    return 0
+    return 1
 }
 
-validate_php_version() {
-    local version="$1"
-    for valid_version in "${PHP_VERSIONS[@]}"; do
-        if [[ "$version" == "$valid_version" ]]; then
-            return 0
+sanitize_input() {
+    echo "$1" | tr -cd 'a-zA-Z0-9_-'
+}
+
+# ----------------------------
+# 🔄 BACKUP & RECOVERY FUNCTIONS
+# ----------------------------
+create_backup() {
+    local app_name="$1"
+    local app_path="$2"
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_path="$BACKUP_DIR/$app_name/$timestamp"
+    
+    log_info "Creating backup for $app_name..."
+    
+    # Create backup directory
+    mkdir -p "$backup_path"
+    
+    # Backup database
+    if [[ -f "$app_path/.env" ]]; then
+        extract_db_credentials "$app_path/.env"
+        if [[ -n "$DB_NAME" ]] && [[ -n "$DB_USER" ]] && [[ -n "$DB_PASSWORD" ]]; then
+            log_info "Backing up database: $DB_NAME"
+            mysqldump --single-transaction --quick \
+                -u"$DB_USER" -p"$DB_PASSWORD" "$DB_NAME" \
+                > "$backup_path/database.sql" 2>> "$ERROR_LOG_FILE"
+            
+            if [[ $? -eq 0 ]]; then
+                gzip "$backup_path/database.sql"
+                log_success "Database backup completed"
+            else
+                log_warning "Database backup failed"
+            fi
         fi
-    done
-    return 1
+    fi
+    
+    # Backup files (exclude large directories)
+    log_info "Backing up application files..."
+    rsync -a --exclude={'vendor','node_modules','storage/framework/cache','storage/logs','.git'} \
+        "$app_path/" "$backup_path/files/"
+    
+    # Backup .env file separately
+    if [[ -f "$app_path/.env" ]]; then
+        cp "$app_path/.env" "$backup_path/"
+    fi
+    
+    # Create backup manifest
+    cat > "$backup_path/manifest.json" << EOF
+{
+    "app_name": "$app_name",
+    "timestamp": "$timestamp",
+    "backup_path": "$backup_path",
+    "file_count": "$(find "$backup_path/files" -type f | wc -l)",
+    "database_size": "$(stat -c%s "$backup_path/database.sql.gz" 2>/dev/null || echo 0)",
+    "created_by": "$(whoami)",
+    "hostname": "$(hostname)"
+}
+EOF
+    
+    # Cleanup old backups
+    cleanup_old_backups "$app_name"
+    
+    # Optional: Upload to remote storage
+    if [[ $REMOTE_BACKUP_ENABLED -eq 1 ]]; then
+        upload_to_remote "$backup_path" "$app_name/$timestamp"
+    fi
+    
+    echo "$backup_path"
 }
 
 cleanup_old_backups() {
@@ -108,504 +226,1112 @@ cleanup_old_backups() {
     local backup_dir="$BACKUP_DIR/$app_name"
     
     if [[ -d "$backup_dir" ]]; then
-        # Hitung jumlah backup
-        local backup_count=$(ls -1 "$backup_dir" | wc -l)
+        log_info "Cleaning up old backups for $app_name..."
+        
+        # Remove backups older than retention days
+        find "$backup_dir" -maxdepth 1 -type d -mtime +$BACKUP_RETENTION_DAYS -exec rm -rf {} \;
+        
+        # Keep only last N backups
+        local backups=($(ls -1t "$backup_dir" 2>/dev/null))
+        local backup_count=${#backups[@]}
         
         if [[ $backup_count -gt $MAX_BACKUPS ]]; then
-            log_info "Cleaning up old backups for $app_name (keeping last $MAX_BACKUPS)"
-            # Hapus backup terlama
-            ls -1t "$backup_dir" | tail -n +$((MAX_BACKUPS + 1)) | while read -r old_backup; do
-                rm -rf "$backup_dir/$old_backup"
-                log_info "Removed old backup: $old_backup"
+            for ((i=MAX_BACKUPS; i<backup_count; i++)); do
+                rm -rf "$backup_dir/${backups[$i]}"
+            done
+        fi
+        
+        log_success "Backup cleanup completed"
+    fi
+}
+
+restore_backup() {
+    local app_name="$1"
+    local timestamp="$2"
+    local backup_path="$BACKUP_DIR/$app_name/$timestamp"
+    
+    if [[ ! -d "$backup_path" ]]; then
+        log_error "Backup not found: $backup_path"
+        return 1
+    fi
+    
+    log_info "Restoring backup $timestamp for $app_name..."
+    
+    # Stop services temporarily
+    if [[ $ZERO_DOWNTIME_ENABLED -eq 1 ]]; then
+        enable_maintenance_mode "$app_name"
+    fi
+    
+    # Restore database
+    if [[ -f "$backup_path/database.sql.gz" ]]; then
+        log_info "Restoring database..."
+        gunzip -c "$backup_path/database.sql.gz" | mysql "$DB_NAME"
+    fi
+    
+    # Restore files
+    local app_path="$WWW_DIR/$app_name"
+    log_info "Restoring files..."
+    rm -rf "$app_path"
+    cp -r "$backup_path/files" "$app_path"
+    
+    # Restore .env
+    if [[ -f "$backup_path/.env" ]]; then
+        cp "$backup_path/.env" "$app_path/.env"
+    fi
+    
+    # Fix permissions
+    fix_permissions "$app_path"
+    
+    # Restart services
+    restart_services
+    
+    log_success "Restore completed successfully"
+}
+
+# ----------------------------
+# 🚀 ZERO-DOWNTIME DEPLOYMENT
+# ----------------------------
+zero_downtime_deploy() {
+    local app_name="$1"
+    local app_path="$WWW_DIR/$app_name"
+    local release_id=$(date +%Y%m%d%H%M%S)
+    local release_dir="$RELEASES_DIR/$app_name/releases/$release_id"
+    local current_link="$RELEASES_DIR/$app_name/current"
+    local shared_dir="$RELEASES_DIR/$app_name/shared"
+    
+    log_info "Starting zero-downtime deployment for $app_name..."
+    
+    # Create directory structure
+    mkdir -p "$release_dir" "$shared_dir"
+    
+    # Copy application files to new release
+    log_info "Copying application files..."
+    rsync -a --exclude={'storage','.env','vendor','node_modules'} \
+        "$app_path/" "$release_dir/"
+    
+    # Link shared directories
+    ln -sfn "$shared_dir/storage" "$release_dir/storage"
+    ln -sfn "$app_path/.env" "$release_dir/.env"
+    
+    # Run deployment steps in new release
+    cd "$release_dir"
+    
+    # Install dependencies
+    log_info "Installing dependencies..."
+    composer install --no-dev --optimize-autoloader --no-interaction
+    
+    # Run migrations
+    log_info "Running database migrations..."
+    php artisan migrate --force --no-interaction
+    
+    # Optimize application
+    log_info "Optimizing application..."
+    php artisan config:cache
+    php artisan route:cache
+    php artisan view:cache
+    
+    # Switch to new release
+    log_info "Switching to new release..."
+    ln -sfn "$release_dir" "$current_link"
+    
+    # Reload PHP-FPM without interrupting requests
+    log_info "Reloading PHP-FPM..."
+    sudo /bin/kill -USR2 $(cat /var/run/php/php$(get_php_version "$app_name")-fpm.pid 2>/dev/null) 2>/dev/null || true
+    
+    # Cleanup old releases (keep last 5)
+    cleanup_old_releases "$app_name"
+    
+    log_success "Zero-downtime deployment completed"
+}
+
+cleanup_old_releases() {
+    local app_name="$1"
+    local releases_dir="$RELEASES_DIR/$app_name/releases"
+    
+    if [[ -d "$releases_dir" ]]; then
+        local releases=($(ls -1t "$releases_dir" 2>/dev/null))
+        local release_count=${#releases[@]}
+        
+        if [[ $release_count -gt 5 ]]; then
+            for ((i=5; i<release_count; i++)); do
+                rm -rf "$releases_dir/${releases[$i]}"
             done
         fi
     fi
 }
 
-check_laravel_app() {
-    local app_path="$1"
+enable_maintenance_mode() {
+    local app_name="$1"
+    local app_path="$WWW_DIR/$app_name"
     
-    # Cek apakah ini benar-benar aplikasi Laravel
-    if [[ ! -f "$app_path/artisan" ]]; then
+    log_info "Enabling maintenance mode for $app_name..."
+    
+    cd "$app_path"
+    php artisan down --retry=60 --secret=$(generate_secure_password) \
+        --render="errors::503" --refresh=15
+    
+    # Create maintenance page
+    cat > "$app_path/resources/views/errors/503.blade.php" << 'EOF'
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Maintenance Mode</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; padding: 50px; }
+        h1 { font-size: 50px; }
+        body { font: 20px Helvetica, sans-serif; color: #333; }
+        article { display: block; text-align: left; max-width: 650px; margin: 0 auto; }
+        a { color: #dc8100; text-decoration: none; }
+        a:hover { color: #333; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <article>
+        <h1>We'll be back soon!</h1>
+        <div>
+            <p>Sorry for the inconvenience but we're performing some maintenance at the moment.</p>
+            <p>We'll be back online shortly!</p>
+            <p>&mdash; The Team</p>
+        </div>
+    </article>
+</body>
+</html>
+EOF
+}
+
+disable_maintenance_mode() {
+    local app_name="$1"
+    local app_path="$WWW_DIR/$app_name"
+    
+    log_info "Disabling maintenance mode for $app_name..."
+    
+    cd "$app_path"
+    php artisan up
+}
+
+# ----------------------------
+# 🔒 SECURITY HARDENING
+# ----------------------------
+harden_security() {
+    log_info "Applying security hardening..."
+    
+    # 1. Configure firewall
+    if [[ $ENABLE_FIREWALL -eq 1 ]]; then
+        configure_firewall
+    fi
+    
+    # 2. Install and configure Fail2Ban
+    if [[ $ENABLE_FAIL2BAN -eq 1 ]]; then
+        configure_fail2ban
+    fi
+    
+    # 3. Secure SSH
+    secure_ssh
+    
+    # 4. Set file permissions
+    set_secure_permissions
+    
+    # 5. Configure kernel parameters
+    configure_kernel_security
+}
+
+configure_firewall() {
+    log_info "Configuring firewall..."
+    
+    if ! command -v ufw &> /dev/null; then
+        apt install -y ufw
+    fi
+    
+    ufw --force reset
+    ufw default deny incoming
+    ufw default allow outgoing
+    ufw allow ssh
+    ufw allow http
+    ufw allow https
+    ufw allow $MONITORING_PORT/tcp comment 'Node Exporter'
+    ufw --force enable
+    
+    log_success "Firewall configured"
+}
+
+configure_fail2ban() {
+    log_info "Configuring Fail2Ban..."
+    
+    apt install -y fail2ban
+    
+    # Create Laravel jail
+    cat > /etc/fail2ban/jail.d/laravel.conf << EOF
+[laravel]
+enabled = true
+port = http,https
+filter = laravel
+logpath = /var/www/*/storage/logs/laravel.log
+maxretry = 5
+bantime = 3600
+findtime = 600
+EOF
+    
+    # Create Laravel filter
+    cat > /etc/fail2ban/filter.d/laravel.conf << EOF
+[Definition]
+failregex = ^.*local\.ERROR:.*Too many login attempts.*
+            ^.*local\.ERROR:.*Authentication attempt failed.*
+            ^.*local\.ERROR:.*Failed to authenticate.*
+ignoreregex =
+EOF
+    
+    systemctl restart fail2ban
+    log_success "Fail2Ban configured"
+}
+
+secure_ssh() {
+    log_info "Securing SSH configuration..."
+    
+    # Backup original config
+    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup
+    
+    # Apply security settings
+    sed -i 's/^#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+    sed -i 's/^#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+    sed -i 's/^#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+    sed -i 's/^#ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
+    sed -i 's/^#UsePAM.*/UsePAM yes/' /etc/ssh/sshd_config
+    sed -i 's/^#MaxAuthTries.*/MaxAuthTries 3/' /etc/ssh/sshd_config
+    sed -i 's/^#ClientAliveInterval.*/ClientAliveInterval 300/' /etc/ssh/sshd_config
+    sed -i 's/^#ClientAliveCountMax.*/ClientAliveCountMax 2/' /etc/ssh/sshd_config
+    
+    echo "AllowUsers $(whoami)" >> /etc/ssh/sshd_config
+    
+    systemctl restart sshd
+    log_success "SSH secured"
+}
+
+configure_kernel_security() {
+    log_info "Configuring kernel security parameters..."
+    
+    cat >> /etc/sysctl.conf << EOF
+# Kernel security settings
+net.ipv4.tcp_syncookies = 1
+net.ipv4.ip_forward = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.secure_redirects = 0
+net.ipv4.conf.default.secure_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+net.ipv4.icmp_ignore_bogus_error_responses = 1
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.log_martians = 1
+fs.protected_hardlinks = 1
+fs.protected_symlinks = 1
+kernel.core_uses_pid = 1
+kernel.kptr_restrict = 2
+kernel.sysrq = 0
+kernel.yama.ptrace_scope = 1
+EOF
+    
+    sysctl -p
+    log_success "Kernel security configured"
+}
+
+# ----------------------------
+# 💰 COST OPTIMIZATION
+# ----------------------------
+optimize_costs() {
+    log_info "Applying cost optimization measures..."
+    
+    # 1. Install and configure Redis
+    if [[ $REDIS_ENABLED -eq 1 ]]; then
+        install_redis
+    fi
+    
+    # 2. Configure PHP OpCache
+    if [[ $PHP_OPCACHE_ENABLED -eq 1 ]]; then
+        configure_opcache
+    fi
+    
+    # 3. Configure Nginx caching
+    configure_nginx_cache
+    
+    # 4. Optimize MariaDB
+    optimize_mariadb
+    
+    # 5. Setup log rotation
+    configure_log_rotation
+}
+
+install_redis() {
+    log_info "Installing and configuring Redis..."
+    
+    apt install -y redis-server
+    
+    # Configure Redis
+    sed -i "s/^# maxmemory .*/maxmemory $REDIS_MEMORY/" /etc/redis/redis.conf
+    sed -i "s/^# maxmemory-policy .*/maxmemory-policy $REDIS_MAXMEMORY_POLICY/" /etc/redis/redis.conf
+    sed -i "s/^supervised no/supervised systemd/" /etc/redis/redis.conf
+    sed -i "s/^bind 127.0.0.1 ::1/bind 127.0.0.1/" /etc/redis/redis.conf
+    
+    # Enable Redis persistence
+    cat >> /etc/redis/redis.conf << EOF
+# Enable AOF persistence
+appendonly yes
+appendfilename "appendonly.aof"
+appendfsync everysec
+no-appendfsync-on-rewrite no
+auto-aof-rewrite-percentage 100
+auto-aof-rewrite-min-size 64mb
+EOF
+    
+    systemctl restart redis
+    
+    # Update Laravel .env files to use Redis
+    for app_path in "$WWW_DIR"/*; do
+        if [[ -f "$app_path/.env" ]]; then
+            sed -i "s/CACHE_DRIVER=file/CACHE_DRIVER=redis/" "$app_path/.env"
+            sed -i "s/SESSION_DRIVER=file/SESSION_DRIVER=redis/" "$app_path/.env"
+            sed -i "s/QUEUE_CONNECTION=sync/QUEUE_CONNECTION=redis/" "$app_path/.env"
+        fi
+    done
+    
+    log_success "Redis configured"
+}
+
+configure_opcache() {
+    log_info "Configuring PHP OpCache..."
+    
+    for version in "${PHP_VERSIONS[@]}"; do
+        if [[ -f "/etc/php/$version/fpm/conf.d/10-opcache.ini" ]]; then
+            cat > "/etc/php/$version/fpm/conf.d/10-opcache.ini" << EOF
+zend_extension=opcache.so
+opcache.enable=1
+opcache.enable_cli=1
+opcache.memory_consumption=256
+opcache.interned_strings_buffer=16
+opcache.max_accelerated_files=20000
+opcache.max_wasted_percentage=10
+opcache.use_cwd=1
+opcache.validate_timestamps=0
+opcache.revalidate_freq=2
+opcache.fast_shutdown=1
+opcache.enable_file_override=1
+opcache.optimization_level=0x7FFFBFFF
+opcache.file_cache=/tmp/php-opcache
+EOF
+        fi
+    done
+    log_success "OpCache configured"
+}
+
+configure_nginx_cache() {
+    log_info "Configuring Nginx caching..."
+    
+    # Create cache directories
+    mkdir -p /var/cache/nginx/{proxy,temp,fastcgi,scgi,uwsgi}
+    chown -R www-data:www-data /var/cache/nginx
+    
+    # Add cache configuration to nginx.conf
+    cat >> /etc/nginx/nginx.conf << EOF
+# Cache configuration
+proxy_cache_path /var/cache/nginx/proxy levels=1:2 keys_zone=proxy_cache:10m max_size=1g inactive=60m use_temp_path=off;
+fastcgi_cache_path /var/cache/nginx/fastcgi levels=1:2 keys_zone=fastcgi_cache:10m max_size=1g inactive=60m use_temp_path=off;
+proxy_cache_key "\$scheme\$request_method\$host\$request_uri";
+fastcgi_cache_key "\$scheme\$request_method\$host\$request_uri";
+EOF
+    
+    log_success "Nginx caching configured"
+}
+
+optimize_mariadb() {
+    log_info "Optimizing MariaDB configuration..."
+    
+    # Calculate optimal values based on available memory
+    local total_memory=$(free -m | awk '/^Mem:/{print $2}')
+    local innodb_buffer_pool=$((total_memory * 50 / 100))M
+    local key_buffer=$((total_memory * 10 / 100))M
+    local max_connections=200
+    
+    cat > /etc/mysql/mariadb.conf.d/99-optimization.cnf << EOF
+[mysqld]
+# Memory Configuration
+innodb_buffer_pool_size = $innodb_buffer_pool
+key_buffer_size = $key_buffer
+query_cache_size = 64M
+query_cache_type = 1
+tmp_table_size = 64M
+max_heap_table_size = 64M
+
+# Connection Configuration
+max_connections = $max_connections
+thread_cache_size = 50
+table_open_cache = 4000
+table_definition_cache = 4000
+
+# InnoDB Configuration
+innodb_log_file_size = 256M
+innodb_flush_log_at_trx_commit = 2
+innodb_flush_method = O_DIRECT
+innodb_file_per_table = 1
+innodb_buffer_pool_instances = 8
+
+# Query Optimization
+join_buffer_size = 4M
+sort_buffer_size = 4M
+read_buffer_size = 2M
+read_rnd_buffer_size = 4M
+
+# Logging
+slow_query_log = 1
+slow_query_log_file = /var/log/mysql/slow-queries.log
+long_query_time = 2
+log_queries_not_using_indexes = 1
+
+# Other Optimizations
+character-set-server = utf8mb4
+collation-server = utf8mb4_unicode_ci
+EOF
+    
+    systemctl restart mariadb
+    
+    # Optimize existing tables
+    mysql -e "SELECT CONCAT('OPTIMIZE TABLE ', table_schema, '.', table_name, ';') FROM information_schema.tables WHERE table_schema NOT IN ('mysql', 'information_schema', 'performance_schema') AND ENGINE IS NOT NULL" | mysql
+    
+    log_success "MariaDB optimized"
+}
+
+# ----------------------------
+# 🛠️ DEPLOYMENT FUNCTIONS
+# ----------------------------
+deploy_application() {
+    local app_name="$1"
+    local app_path="$WWW_DIR/$app_name"
+    
+    log_info "Starting deployment of $app_name"
+    
+    # 1. Create backup
+    local backup_path=$(create_backup "$app_name" "$app_path")
+    
+    # 2. Enable maintenance mode
+    if [[ $MAINTENANCE_MODE_ENABLED -eq 1 ]]; then
+        enable_maintenance_mode "$app_name"
+    fi
+    
+    # 3. Perform deployment
+    if [[ $ZERO_DOWNTIME_ENABLED -eq 1 ]]; then
+        zero_downtime_deploy "$app_name"
+    else
+        traditional_deploy "$app_name"
+    fi
+    
+    # 4. Disable maintenance mode
+    if [[ $MAINTENANCE_MODE_ENABLED -eq 1 ]]; then
+        disable_maintenance_mode "$app_name"
+    fi
+    
+    # 5. Verify deployment
+    verify_deployment "$app_name"
+    
+    log_success "Deployment completed for $app_name"
+    echo "$backup_path"
+}
+
+traditional_deploy() {
+    local app_name="$1"
+    local app_path="$WWW_DIR/$app_name"
+    
+    log_info "Performing traditional deployment..."
+    
+    cd "$app_path"
+    
+    # Update code
+    if [[ -d ".git" ]]; then
+        git pull origin main
+    fi
+    
+    # Install dependencies
+    composer install --no-dev --optimize-autoloader --no-interaction
+    
+    # Run migrations
+    php artisan migrate --force --no-interaction
+    
+    # Clear caches
+    php artisan config:clear
+    php artisan route:clear
+    php artisan view:clear
+    php artisan cache:clear
+    
+    # Optimize
+    php artisan config:cache
+    php artisan route:cache
+    php artisan view:cache
+    
+    # Fix permissions
+    fix_permissions "$app_path"
+}
+
+verify_deployment() {
+    local app_name="$1"
+    local app_path="$WWW_DIR/$app_name"
+    
+    log_info "Verifying deployment..."
+    
+    # Check if artisan is working
+    if ! cd "$app_path" && php artisan --version > /dev/null 2>&1; then
+        log_error "Artisan command failed"
         return 1
     fi
     
-    if [[ ! -f "$app_path/composer.json" ]]; then
-        log_warning "No composer.json found in $app_path"
-        return 2
+    # Check if routes are cached
+    if [[ -f "$app_path/bootstrap/cache/routes.php" ]]; then
+        log_success "Routes are cached"
     fi
     
-    # Cek versi Laravel dari composer.json
-    if [[ -f "$app_path/composer.json" ]]; then
-        local laravel_version=$(grep -o '"laravel/framework":[[:space:]]*"[^"]*' "$app_path/composer.json" | cut -d'"' -f4)
-        if [[ -n "$laravel_version" ]]; then
-            log_info "Detected Laravel $laravel_version"
-        fi
+    # Check if config is cached
+    if [[ -f "$app_path/bootstrap/cache/config.php" ]]; then
+        log_success "Config is cached"
     fi
     
-    return 0
-}
-
-setup_ssl() {
-    local domain="$1"
-    local app_path="$2"
-    
-    log_info "Setting up SSL for $domain"
-    
-    # Cek apakah certbot sudah terinstall
-    if ! check_cmd certbot; then
-        log_info "Installing certbot..."
-        apt install -y certbot python3-certbot-nginx >> "$LOG_FILE" 2>&1
-    fi
-    
-    # Coba dapatkan sertifikat SSL
-    if certbot --nginx -d "$domain" --non-interactive --agree-tos --email admin@$domain >> "$LOG_FILE" 2>&1; then
-        log_success "SSL certificate obtained for $domain"
-        
-        # Update nginx config untuk HTTPS
-        local vhost_file="/etc/nginx/sites-available/$domain.conf"
-        if [[ -f "$vhost_file" ]]; then
-            # Otomatis redirect HTTP ke HTTPS
-            sed -i 's/listen 80;/listen 80;\n    listen 443 ssl http2;/' "$vhost_file"
-            log_info "Updated nginx config for HTTPS"
-        fi
+    # Test database connection
+    if cd "$app_path" && php artisan tinker --execute="echo DB::connection()->getPdo() ? 'OK' : 'FAIL';" 2>/dev/null | grep -q "OK"; then
+        log_success "Database connection OK"
     else
-        log_warning "Failed to obtain SSL certificate for $domain"
-    fi
-}
-
-check_requirements() {
-    log_info "Checking system requirements..."
-    
-    # Cek RAM
-    local total_ram=$(free -m | awk '/^Mem:/{print $2}')
-    if [[ $total_ram -lt 1024 ]]; then
-        log_warning "Low RAM detected: ${total_ram}MB (recommended: 1024MB+)"
+        log_warning "Database connection test failed"
     fi
     
-    # Cek disk space
-    local disk_free=$(df -h / | awk 'NR==2 {print $4}')
-    log_info "Disk free space: $disk_free"
-    
-    # Cek OS version
-    if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        log_info "OS: $NAME $VERSION"
-    fi
-}
-
-setup_firewall() {
-    log_info "Configuring firewall..."
-    
-    if check_cmd ufw; then
-        ufw allow ssh >> "$LOG_FILE" 2>&1
-        ufw allow 'Nginx Full' >> "$LOG_FILE" 2>&1
-        ufw --force enable >> "$LOG_FILE" 2>&1
-        log_success "Firewall configured"
-    else
-        log_warning "UFW not found, skipping firewall setup"
-    fi
-}
-
-install_composer() {
-    if ! check_cmd composer; then
-        log_info "Installing Composer..."
-        curl -sS https://getcomposer.org/installer | php >> "$LOG_FILE" 2>&1
-        mv composer.phar /usr/local/bin/composer
-        chmod +x /usr/local/bin/composer
-        log_success "Composer installed"
-    fi
+    log_success "Deployment verification completed"
 }
 
 # ----------------------------
-# ⚡ Ensure curl exists
+# 📦 APPLICATION MANAGEMENT
 # ----------------------------
-if ! check_cmd curl; then
-    log_info "curl not found. Installing curl..."
-    apt update -y >> "$LOG_FILE" 2>&1
-    apt install -y curl >> "$LOG_FILE" 2>&1
-    log_success "curl installed"
-fi
-
-# ----------------------------
-# 🔄 Auto-update Script (Safe)
-# ----------------------------
-log_info "Checking for script updates..."
-TMP_SCRIPT=$(mktemp)
-if curl -fsSL "$SCRIPT_REPO" -o "$TMP_SCRIPT"; then
-    CURRENT_HASH=$(sha256sum "$0" | awk '{print $1}')
-    NEW_HASH=$(sha256sum "$TMP_SCRIPT" | awk '{print $1}')
+scan_applications() {
+    log_info "Scanning for Laravel applications..."
     
-    if [[ "$CURRENT_HASH" != "$NEW_HASH" ]]; then
-        log_info "New version available. Updating..."
-        chmod +x "$TMP_SCRIPT"
-        mv "$TMP_SCRIPT" "$0"
-        log_success "Script updated successfully. Please run again."
-        exit 0
-    else
-        log_info "Script is up to date"
-        rm -f "$TMP_SCRIPT"
-    fi
-else
-    log_warning "Cannot check for updates. Continuing with current version."
-fi
-
-# ----------------------------
-# 🌐 Ensure directories exist
-# ----------------------------
-mkdir -p "$WWW_DIR" "$BACKUP_DIR"
-chmod 755 "$BACKUP_DIR"
-
-# ----------------------------
-# 🛡️ Security Check
-# ----------------------------
-check_requirements
-
-# ----------------------------
-# 1️⃣ Install Dependencies
-# ----------------------------
-log_info "Installing dependencies..."
-apt update -y >> "$LOG_FILE" 2>&1
-
-# Install PHP versi yang didukung
-apt install -y nginx mariadb-server unzip git curl >> "$LOG_FILE" 2>&1
-
-# Install multiple PHP versions
-for version in "${PHP_VERSIONS[@]}"; do
-    if ! dpkg -l | grep -q "php$version"; then
-        log_info "Installing PHP $version..."
-        apt install -y "php$version" "php$version-fpm" "php$version-mysql" \
-            "php$version-curl" "php$version-gd" "php$version-mbstring" \
-            "php$version-xml" "php$version-zip" "php$version-bcmath" >> "$LOG_FILE" 2>&1
-    fi
-done
-
-install_composer
-
-# ----------------------------
-# 🔧 Setup PHP Pool Configuration
-# ----------------------------
-log_info "Configuring PHP-FPM pools..."
-for version in "${PHP_VERSIONS[@]}"; do
-    if [[ -f "/etc/php/$version/fpm/pool.d/www.conf" ]]; then
-        # Optimize PHP-FPM settings
-        sed -i 's/^pm = .*/pm = dynamic/' "/etc/php/$version/fpm/pool.d/www.conf"
-        sed -i 's/^pm.max_children = .*/pm.max_children = 50/' "/etc/php/$version/fpm/pool.d/www.conf"
-        sed -i 's/^pm.start_servers = .*/pm.start_servers = 5/' "/etc/php/$version/fpm/pool.d/www.conf"
-        sed -i 's/^pm.min_spare_servers = .*/pm.min_spare_servers = 5/' "/etc/php/$version/fpm/pool.d/www.conf"
-        sed -i 's/^pm.max_spare_servers = .*/pm.max_spare_servers = 10/' "/etc/php/$version/fpm/pool.d/www.conf"
-    fi
-done
-
-# ----------------------------
-# 3️⃣ Scan /var/www for Laravel apps
-# ----------------------------
-log_info "Scanning $WWW_DIR for Laravel applications..."
-APPS=()
-for dir in "$WWW_DIR"/*; do
-    if [[ -d "$dir" ]]; then
-        if check_laravel_app "$dir"; then
-            APPS+=("$(basename "$dir")")
-        fi
-    fi
-done
-
-APP_COUNT=${#APPS[@]}
-if [[ $APP_COUNT -eq 0 ]]; then
-    log_error "No Laravel applications found in $WWW_DIR"
-    exit 1
-fi
-
-log_success "Found $APP_COUNT Laravel apps: ${APPS[*]}"
-
-# ----------------------------
-# 4️⃣ Deploy Each App
-# ----------------------------
-for APP in "${APPS[@]}"; do
-    APP_PATH="$WWW_DIR/$APP"
-    log_info "🚀 Deploying $APP"
-    
-    # Validasi aplikasi Laravel
-    if ! check_laravel_app "$APP_PATH"; then
-        log_warning "Skipping $APP - Not a valid Laravel application"
-        continue
-    fi
-    
-    # PHP version selection
-    PHP_VERSION="8.1"
-    if [[ $SILENT_MODE -eq 0 ]]; then
-        while true; do
-            PHP_VERSION=$(prompt "Enter PHP version for $APP [7.4|8.0|8.1|8.2|8.3] (default: 8.1): " "8.1")
-            if validate_php_version "$PHP_VERSION"; then
-                break
-            else
-                echo "Invalid PHP version. Please choose from: ${PHP_VERSIONS[*]}"
+    local apps=()
+    for dir in "$WWW_DIR"/*; do
+        if [[ -d "$dir" ]] && [[ -f "$dir/artisan" ]] && [[ -f "$dir/composer.json" ]]; then
+            local app_name=$(basename "$dir")
+            
+            # Validate Laravel application
+            if grep -q '"laravel/framework"' "$dir/composer.json"; then
+                apps+=("$app_name")
+                
+                # Detect Laravel version
+                local version=$(grep -o '"laravel/framework":"[^"]*' "$dir/composer.json" | cut -d'"' -f4)
+                log_info "Found: $app_name (Laravel $version)"
             fi
-        done
-    fi
+        fi
+    done
     
-    # Backup dengan timestamp
-    BACKUP_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-    BACKUP_PATH="$BACKUP_DIR/$APP/$BACKUP_TIMESTAMP"
-    mkdir -p "$BACKUP_PATH"
+    echo "${apps[@]}"
+}
+
+get_php_version() {
+    local app_name="$1"
+    local app_path="$WWW_DIR/$app_name"
     
-    # Backup database jika ada .env
-    if [[ -f "$APP_PATH/.env" ]]; then
-        # Extract database info from .env
-        DB_NAME=$(grep -E '^DB_DATABASE=' "$APP_PATH/.env" | cut -d'=' -f2)
-        if [[ -n "$DB_NAME" ]]; then
-            mysqldump "$DB_NAME" > "$BACKUP_PATH/database.sql" 2>/dev/null || true
+    if [[ -f "$app_path/.env" ]]; then
+        # Try to extract from .env
+        local env_version=$(grep -E '^PHP_VERSION=' "$app_path/.env" | cut -d'=' -f2)
+        if [[ -n "$env_version" ]]; then
+            echo "$env_version"
+            return
         fi
     fi
     
-    # Backup files (exclude node_modules, vendor, storage)
-    rsync -a --exclude={'node_modules','vendor','storage/logs','storage/framework/cache'} \
-        "$APP_PATH/" "$BACKUP_PATH/files/"
-    
-    # Cleanup old backups
-    cleanup_old_backups "$APP"
-    
-    log_success "Backup created: $BACKUP_PATH"
-    
-    # Database setup
-    DB_NAME=$(echo "$APP" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_')_db
-    DB_USER=$(echo "$APP" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_')_user
-    DB_PASS=$(openssl rand -base64 32 | tr -cd 'a-zA-Z0-9' | head -c 24)
-    
-    # Create database
-    mysql -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>> "$ERROR_LOG_FILE"
-    
-    # Create user dengan password yang aman
-    mysql -e "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';" 2>> "$ERROR_LOG_FILE"
-    mysql -e "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';" 2>> "$ERROR_LOG_FILE"
-    mysql -e "FLUSH PRIVILEGES;" 2>> "$ERROR_LOG_FILE"
-    
-    # Update .env file
-    if [[ -f "$APP_PATH/.env.example" && ! -f "$APP_PATH/.env" ]]; then
-        cp "$APP_PATH/.env.example" "$APP_PATH/.env"
-    fi
-    
-    if [[ -f "$APP_PATH/.env" ]]; then
-        # Backup original .env
-        cp "$APP_PATH/.env" "$APP_PATH/.env.backup-$BACKUP_TIMESTAMP"
-        
-        # Update database configuration
-        sed -i "s/^DB_DATABASE=.*/DB_DATABASE=$DB_NAME/" "$APP_PATH/.env"
-        sed -i "s/^DB_USERNAME=.*/DB_USERNAME=$DB_USER/" "$APP_PATH/.env"
-        sed -i "s/^DB_PASSWORD=.*/DB_PASSWORD='$DB_PASS'/" "$APP_PATH/.env"
-        sed -i "s/^APP_URL=.*/APP_URL=http:\/\/$DOMAIN/" "$APP_PATH/.env"
-        
-        # Set APP_DEBUG to false for production
-        sed -i "s/^APP_DEBUG=.*/APP_DEBUG=false/" "$APP_PATH/.env"
-        
-        # Generate application key if not exists
-        if ! grep -q "^APP_KEY=base64:" "$APP_PATH/.env"; then
-            cd "$APP_PATH"
-            php artisan key:generate --force >> "$LOG_FILE" 2>&1
+    # Check composer.json for PHP requirement
+    if [[ -f "$app_path/composer.json" ]]; then
+        local composer_version=$(grep -o '"php":"[^"]*' "$app_path/composer.json" | cut -d'"' -f4)
+        if [[ "$composer_version" == *"7.4"* ]]; then
+            echo "7.4"
+        elif [[ "$composer_version" == *"8.0"* ]]; then
+            echo "8.0"
+        elif [[ "$composer_version" == *"8.1"* ]]; then
+            echo "8.1"
+        elif [[ "$composer_version" == *"8.2"* ]]; then
+            echo "8.2"
+        elif [[ "$composer_version" == *"8.3"* ]]; then
+            echo "8.3"
+        else
+            echo "$DEFAULT_PHP_VERSION"
         fi
+    else
+        echo "$DEFAULT_PHP_VERSION"
     fi
+}
+
+fix_permissions() {
+    local app_path="$1"
     
-    # Save database credentials to secure file
-    DB_INFO_FILE="$BACKUP_DIR/$APP/db_credentials.txt"
-    echo "=== Database Credentials for $APP ===" > "$DB_INFO_FILE"
-    echo "Database: $DB_NAME" >> "$DB_INFO_FILE"
-    echo "Username: $DB_USER" >> "$DB_INFO_FILE"
-    echo "Password: $DB_PASS" >> "$DB_INFO_FILE"
-    echo "Backup: $BACKUP_PATH" >> "$DB_INFO_FILE"
-    echo "=====================================" >> "$DB_INFO_FILE"
-    chmod 600 "$DB_INFO_FILE"
+    log_info "Fixing permissions..."
     
-    echo -e "\n💾 DB INFO for $APP"
-    echo "Database : $DB_NAME"
-    echo "User     : $DB_USER"
-    echo "Password : $DB_PASS"
-    echo "Backup   : $BACKUP_PATH"
-    echo "---------------------------"
+    # Set directory permissions
+    find "$app_path" -type d -exec chmod 755 {} \;
     
-    # Run Laravel optimizations
-    cd "$APP_PATH"
-    
-    # Install composer dependencies
-    if [[ -f "composer.json" ]]; then
-        log_info "Installing Composer dependencies..."
-        composer install --no-dev --optimize-autoloader >> "$LOG_FILE" 2>&1
-    fi
-    
-    # Run migrations
-    log_info "Running database migrations..."
-    php artisan migrate --force >> "$LOG_FILE" 2>&1
-    
-    # Clear and cache
-    php artisan config:cache >> "$LOG_FILE" 2>&1
-    php artisan route:cache >> "$LOG_FILE" 2>&1
-    php artisan view:cache >> "$LOG_FILE" 2>&1
-    
-    # Permissions dengan lebih spesifik
-    chown -R www-data:www-data "$APP_PATH"
-    find "$APP_PATH" -type d -exec chmod 755 {} \;
-    find "$APP_PATH" -type f -exec chmod 644 {} \;
+    # Set file permissions
+    find "$app_path" -type f -exec chmod 644 {} \;
     
     # Special permissions for storage and cache
-    chmod -R 775 "$APP_PATH/storage"
-    chmod -R 775 "$APP_PATH/bootstrap/cache"
+    chmod -R 775 "$app_path/storage"
+    chmod -R 775 "$app_path/bootstrap/cache"
     
-    # Set proper ownership for log files
-    touch "$APP_PATH/storage/logs/laravel.log"
-    chown www-data:www-data "$APP_PATH/storage/logs/laravel.log"
-    chmod 664 "$APP_PATH/storage/logs/laravel.log"
+    # Set ownership
+    chown -R www-data:www-data "$app_path"
     
-    # Nginx configuration
-    DOMAIN="$APP.local"
-    if [[ $SILENT_MODE -eq 0 ]]; then
-        while true; do
-            DOMAIN=$(prompt "Enter domain for $APP [$APP.local]: " "$APP.local")
-            if validate_domain "$DOMAIN"; then
-                break
-            else
-                echo "Invalid domain format. Please enter a valid domain (example.com)"
-            fi
-        done
-    fi
+    # Log file permissions
+    touch "$app_path/storage/logs/laravel.log"
+    chmod 664 "$app_path/storage/logs/laravel.log"
     
-    VHOST_FILE="/etc/nginx/sites-available/$DOMAIN.conf"
+    log_success "Permissions fixed"
+}
+
+# ----------------------------
+# 📝 CONFIGURATION MANAGEMENT
+# ----------------------------
+configure_nginx_site() {
+    local app_name="$1"
+    local domain="$2"
+    local app_path="$WWW_DIR/$app_name"
+    local php_version=$(get_php_version "$app_name")
     
-    # Security headers dan optimasi
-    cat > "$VHOST_FILE" <<EOL
+    log_info "Configuring Nginx for $domain..."
+    
+    local vhost_file="/etc/nginx/sites-available/$domain.conf"
+    
+    cat > "$vhost_file" << EOF
+# $app_name - $domain
 server {
     listen 80;
     listen [::]:80;
-    server_name $DOMAIN www.$DOMAIN;
-    root $APP_PATH/public;
+    server_name $domain www.$domain;
     
+    # Security headers
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-XSS-Protection "1; mode=block" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline';" always;
     
-    index index.php index.html;
+    # Root directory
+    root $app_path/public;
+    index index.php index.html index.htm;
     
+    # Character set
     charset utf-8;
     
-    # Security: Hide PHP version
-    fastcgi_hide_header X-Powered-By;
+    # Logging
+    access_log /var/log/nginx/${app_name}_access.log;
+    error_log /var/log/nginx/${app_name}_error.log;
     
+    # Gzip compression
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css text/xml text/javascript application/javascript application/xml+rss application/json;
+    
+    # Rate limiting
+    limit_req_zone \$binary_remote_addr zone=api:10m rate=${RATE_LIMIT_PER_IP}r/m;
+    limit_req_zone \$binary_remote_addr zone=global:10m rate=${RATE_LIMIT_PER_IP_BURST}r/m;
+    
+    # Main location
     location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+        
+        # Apply rate limiting
+        limit_req zone=global burst=${RATE_LIMIT_PER_IP_BURST} nodelay;
+    }
+    
+    # API rate limiting
+    location ~ ^/api/ {
+        limit_req zone=api burst=20 nodelay;
         try_files \$uri \$uri/ /index.php?\$query_string;
     }
     
-    location = /favicon.ico { access_log off; log_not_found off; }
-    location = /robots.txt  { access_log off; log_not_found off; }
-    
+    # PHP handling
     location ~ \.php\$ {
-        fastcgi_pass unix:/var/run/php/php$PHP_VERSION-fpm.sock;
+        fastcgi_pass unix:/var/run/php/php${php_version}-fpm.sock;
+        fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
         include fastcgi_params;
+        
+        # FastCGI optimizations
         fastcgi_buffer_size 128k;
         fastcgi_buffers 4 256k;
         fastcgi_busy_buffers_size 256k;
         fastcgi_read_timeout 300;
     }
     
-    location ~ /\.(?!well-known).* {
-        deny all;
-    }
-    
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg)\$ {
+    # Static files
+    location ~* \.(jpg|jpeg|png|gif|ico|css|js|svg)\$ {
         expires 1y;
         add_header Cache-Control "public, immutable";
         access_log off;
     }
     
     # Deny access to sensitive files
-    location ~* \.(env|log|sql|git|svn|htaccess)\$ {
+    location ~ /\.(?!well-known).* {
         deny all;
+        access_log off;
+        log_not_found off;
     }
     
+    location ~ /\.env {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+    
+    location ~ /\.git {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+    
+    location ~ /storage/logs/ {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+    
+    # Health check endpoint
+    location /health {
+        access_log off;
+        return 200 "healthy\n";
+        add_header Content-Type text/plain;
+    }
+    
+    # Client settings
     client_max_body_size 100M;
     client_body_timeout 300s;
 }
-EOL
+EOF
     
     # Enable site
-    ln -sf "$VHOST_FILE" "/etc/nginx/sites-enabled/"
+    ln -sf "$vhost_file" "/etc/nginx/sites-enabled/"
     
-    # Test nginx configuration
-    if nginx -t >> "$LOG_FILE" 2>&1; then
-        log_success "Nginx configuration test passed for $DOMAIN"
+    # Test configuration
+    if nginx -t > /dev/null 2>&1; then
+        log_success "Nginx configuration valid"
     else
-        log_error "Nginx configuration test failed for $DOMAIN"
-        # Disable broken config
-        rm -f "/etc/nginx/sites-enabled/$DOMAIN.conf"
+        log_error "Nginx configuration invalid"
+        rm -f "/etc/nginx/sites-enabled/$domain.conf"
+        return 1
     fi
+}
+
+# ----------------------------
+# 🔧 SERVICE MANAGEMENT
+# ----------------------------
+restart_services() {
+    log_info "Restarting services..."
     
-    # Setup SSL jika diinginkan
-    if [[ $SILENT_MODE -eq 0 ]]; then
-        read -p "Setup SSL for $DOMAIN? (y/n) [n]: " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            setup_ssl "$DOMAIN" "$APP_PATH"
+    # Restart Nginx
+    systemctl restart nginx
+    
+    # Restart PHP-FPM for all versions
+    for version in "${PHP_VERSIONS[@]}"; do
+        if systemctl is-active --quiet "php${version}-fpm"; then
+            systemctl restart "php${version}-fpm"
         fi
+    done
+    
+    # Restart Redis if enabled
+    if [[ $REDIS_ENABLED -eq 1 ]]; then
+        systemctl restart redis
     fi
     
-    log_success "Completed deployment for $APP"
-done
+    # Restart MariaDB
+    systemctl restart mariadb
+    
+    log_success "Services restarted"
+}
 
 # ----------------------------
-# 5️⃣ Restart Services
+# 📊 MONITORING
 # ----------------------------
-log_info "Restarting services..."
-systemctl restart nginx
-
-# Restart semua PHP-FPM versi yang diinstall
-for version in "${PHP_VERSIONS[@]}"; do
-    if systemctl list-unit-files | grep -q "php$version-fpm"; then
-        systemctl restart "php$version-fpm"
+setup_monitoring() {
+    if [[ $ENABLE_MONITORING -eq 0 ]]; then
+        return
     fi
-done
+    
+    log_info "Setting up monitoring..."
+    
+    # Install Node Exporter
+    local node_exporter_version="1.5.0"
+    local node_exporter_url="https://github.com/prometheus/node_exporter/releases/download/v${node_exporter_version}/node_exporter-${node_exporter_version}.linux-amd64.tar.gz"
+    
+    curl -L "$node_exporter_url" -o /tmp/node_exporter.tar.gz
+    tar -xzf /tmp/node_exporter.tar.gz -C /tmp
+    mv "/tmp/node_exporter-${node_exporter_version}.linux-amd64/node_exporter" /usr/local/bin/
+    
+    # Create systemd service
+    cat > /etc/systemd/system/node_exporter.service << EOF
+[Unit]
+Description=Node Exporter
+After=network.target
 
-# Setup firewall
-setup_firewall
+[Service]
+User=nobody
+Group=nogroup
+Type=simple
+ExecStart=/usr/local/bin/node_exporter
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    systemctl daemon-reload
+    systemctl enable node_exporter
+    systemctl start node_exporter
+    
+    # Setup Laravel Horizon if exists
+    for app_path in "$WWW_DIR"/*; do
+        if [[ -f "$app_path/composer.json" ]] && grep -q '"laravel/horizon"' "$app_path/composer.json"; then
+            cd "$app_path"
+            php artisan horizon:install
+            php artisan horizon:publish
+            systemctl enable "horizon-$(basename "$app_path")"
+        fi
+    done
+    
+    log_success "Monitoring setup completed"
+}
 
 # ----------------------------
-# 📊 Generate Deployment Report
+# 📄 REPORTING
 # ----------------------------
-REPORT_FILE="/var/log/laravel_deployment_report_$(date +%Y%m%d).txt"
-echo "=== Laravel Deployment Report ===" > "$REPORT_FILE"
-echo "Date: $(date)" >> "$REPORT_FILE"
-echo "Total Apps: $APP_COUNT" >> "$REPORT_FILE"
-echo "Apps Deployed: ${APPS[*]}" >> "$REPORT_FILE"
-echo "" >> "$REPORT_FILE"
+generate_deployment_report() {
+    local apps=("$@")
+    
+    log_info "Generating deployment report..."
+    
+    cat > "$DEPLOYMENT_REPORT" << EOF
+{
+    "deployment_id": "$(date +%Y%m%d%H%M%S)",
+    "timestamp": "$(date -Iseconds)",
+    "server": {
+        "hostname": "$(hostname)",
+        "os": "$(lsb_release -d | cut -f2)",
+        "kernel": "$(uname -r)",
+        "memory": "$(free -h | awk '/^Mem:/ {print $2}')",
+        "disk": "$(df -h / | awk 'NR==2 {print $4}')"
+    },
+    "deployment_config": {
+        "zero_downtime_enabled": $ZERO_DOWNTIME_ENABLED,
+        "backup_retention_days": $BACKUP_RETENTION_DAYS,
+        "max_backups": $MAX_BACKUPS,
+        "security_hardening": {
+            "firewall": $ENABLE_FIREWALL,
+            "fail2ban": $ENABLE_FAIL2BAN,
+            "rate_limiting": $ENABLE_RATE_LIMITING
+        },
+        "optimization": {
+            "redis_enabled": $REDIS_ENABLED,
+            "opcache_enabled": $PHP_OPCACHE_ENABLED
+        }
+    },
+    "applications": [
+EOF
+    
+    local first=1
+    for app_name in "${apps[@]}"; do
+        local app_path="$WWW_DIR/$app_name"
+        
+        if [[ $first -eq 0 ]]; then
+            echo "," >> "$DEPLOYMENT_REPORT"
+        fi
+        first=0
+        
+        cat >> "$DEPLOYMENT_REPORT" << EOF
+        {
+            "name": "$app_name",
+            "path": "$app_path",
+            "php_version": "$(get_php_version "$app_name")",
+            "laravel_version": "$(get_laravel_version "$app_path")",
+            "database": "$(get_database_info "$app_path")",
+            "domain": "$(get_domain_for_app "$app_name")",
+            "backup_count": "$(get_backup_count "$app_name")",
+            "last_backup": "$(get_last_backup "$app_name")"
+        }
+EOF
+    done
+    
+    cat >> "$DEPLOYMENT_REPORT" << EOF
+    ],
+    "services": {
+        "nginx": "$(systemctl is-active nginx)",
+        "mariadb": "$(systemctl is-active mariadb)",
+        "redis": "$(systemctl is-active redis 2>/dev/null || echo "disabled")",
+        "php_fpm": "$(get_php_fpm_status)"
+    },
+    "summary": {
+        "total_apps": ${#apps[@]},
+        "successful_deployments": "$(get_successful_deployments)",
+        "failed_deployments": "$(get_failed_deployments)",
+        "backup_size": "$(du -sh "$BACKUP_DIR" | cut -f1)"
+    }
+}
+EOF
+    
+    chmod 600 "$DEPLOYMENT_REPORT"
+    log_success "Deployment report generated: $DEPLOYMENT_REPORT"
+}
 
-for APP in "${APPS[@]}"; do
-    echo "--- $APP ---" >> "$REPORT_FILE"
-    DB_INFO_FILE="$BACKUP_DIR/$APP/db_credentials.txt"
-    if [[ -f "$DB_INFO_FILE" ]]; then
-        cat "$DB_INFO_FILE" >> "$REPORT_FILE"
+# ----------------------------
+# 🚦 MAIN EXECUTION
+# ----------------------------
+main() {
+    # Initialize
+    log_info "🚀 Starting Laravel Enterprise Deployment v3.0"
+    log_info "Timestamp: $(date)"
+    log_info "Server: $(hostname)"
+    
+    # Check root privileges
+    if [[ $EUID -ne 0 ]]; then
+        log_error "This script must be run as root"
+        exit 1
     fi
-    echo "" >> "$REPORT_FILE"
-done
-
-echo "=====================================" >> "$REPORT_FILE"
-chmod 600 "$REPORT_FILE"
+    
+    # Create necessary directories
+    mkdir -p "$WWW_DIR" "$BACKUP_DIR" "$RELEASES_DIR" "$SCRIPTS_DIR"
+    
+    # Detect applications
+    local apps=($(scan_applications))
+    
+    if [[ ${#apps[@]} -eq 0 ]]; then
+        log_error "No Laravel applications found in $WWW_DIR"
+        exit 1
+    fi
+    
+    log_success "Found ${#apps[@]} application(s): ${apps[*]}"
+    
+    # Apply security hardening
+    harden_security
+    
+    # Apply cost optimization
+    optimize_costs
+    
+    # Setup monitoring
+    setup_monitoring
+    
+    # Deploy each application
+    local deployment_results=()
+    for app_name in "${apps[@]}"; do
+        if [[ -n "$SPECIFIC_APP" ]] && [[ "$app_name" != "$SPECIFIC_APP" ]]; then
+            continue
+        fi
+        
+        log_info "========================================"
+        log_info "Processing: $app_name"
+        log_info "========================================"
+        
+        # Get domain for application
+        local domain=$(prompt_for_domain "$app_name")
+        
+        # Configure Nginx
+        if ! configure_nginx_site "$app_name" "$domain"; then
+            log_error "Failed to configure Nginx for $app_name"
+            continue
+        fi
+        
+        # Perform deployment
+        if backup_path=$(deploy_application "$app_name"); then
+            deployment_results+=("{\"app\":\"$app_name\",\"status\":\"success\",\"backup\":\"$backup_path\"}")
+        else
+            deployment_results+=("{\"app\":\"$app_name\",\"status\":\"failed\"}")
+            
+            if [[ $ROLLBACK_ON_ERROR -eq 1 ]]; then
+                log_warning "Rolling back $app_name..."
+                restore_backup "$app_name" "$(basename "$backup_path")"
+            fi
+        fi
+    done
+    
+    # Restart services
+    restart_services
+    
+    # Generate report
+    generate_deployment_report "${apps[@]}"
+    
+    # Final summary
+    log_success "========================================"
+    log_success "DEPLOYMENT COMPLETED SUCCESSFULLY!"
+    log_success "========================================"
+    log_info "Summary Report: $DEPLOYMENT_REPORT"
+    log_info "Detailed Log: $LOG_FILE"
+    log_info "Error Log: $ERROR_LOG_FILE"
+    
+    if [[ $SILENT_MODE -eq 0 ]]; then
+        echo ""
+        echo "🎉 All deployments completed!"
+        echo ""
+        echo "Next Steps:"
+        echo "1. Review deployment report: $DEPLOYMENT_REPORT"
+        echo "2. Test each application at its domain"
+        echo "3. Monitor error logs for any issues"
+        echo "4. Setup SSL certificates (if not already)"
+        echo "5. Configure monitoring alerts"
+        echo ""
+    fi
+}
 
 # ----------------------------
-# ✅ Finish
+# 🎯 HELPER FUNCTIONS
 # ----------------------------
-log_success "Laravel Multi-Domain Deploy Completed!"
-log_info "Detailed report: $REPORT_FILE"
-log_info "Error log: $ERROR_LOG_FILE"
+prompt_for_domain() {
+    local app_name="$1"
+    
+    if [[ $SILENT_MODE -eq 1 ]]; then
+        echo "${app_name}.local"
+    else
+        read -p "Enter domain for $app_name [${app_name}.local]: " domain
+        echo "${domain:-${app_name}.local}"
+    fi
+}
 
-if [[ $SILENT_MODE -eq 0 ]]; then
-    echo ""
-    echo "🎉 All deployments completed successfully!"
-    echo "📋 Summary Report: $REPORT_FILE"
-    echo "📝 Detailed Log: $LOG_FILE"
-    echo "❌ Error Log: $ERROR_LOG_FILE"
-    echo ""
-    echo "Next steps:"
-    echo "1. Update DNS records for your domains"
-    echo "2. Configure SSL certificates if needed"
-    echo "3. Set up monitoring and backups"
-    echo ""
-fi
+show_help() {
+    cat << EOF
+Laravel Enterprise Deploy v3.0 - Fase 1
+
+Usage: $0 [OPTIONS]
+
+Options:
+  -s, --silent              Run in silent mode (no prompts)
+  -v, --verbose             Enable verbose output
+  --no-rollback             Disable automatic rollback on error
+  --no-zero-downtime        Disable zero-downtime deployment
+  --backup-only             Only create backups, no deployment
+  --restore                 Restore from backup
+  --app=NAME               Deploy specific application only
+  -h, --help               Show this help message
+  --version                Show version information
+
+Features:
+  • Zero-downtime deployment with release management
+  • Automated backup and recovery with retention policy
+  • Enterprise-grade security hardening
+  • Cost optimization with Redis caching
+  • Comprehensive monitoring setup
+  • Detailed deployment reporting
+
+Examples:
+  $0                         # Deploy all applications
+  $0 --app=myapp            # Deploy specific application
+  $0 --no-zero-downtime     # Traditional deployment
+  $0 --backup-only          # Create backups only
+EOF
+}
+
+# ----------------------------
+# 🚪 ENTRY POINT
+# ----------------------------
+# Set trap for errors
+trap 'log_error "Script terminated unexpectedly"; exit 1' INT TERM
+trap 'final_cleanup' EXIT
+
+# Run main function
+main "$@"
