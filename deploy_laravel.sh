@@ -1,12 +1,13 @@
 #!/bin/bash
 # ==============================================
-# 🚀 Laravel Multi-Domain Deploy Script (v1.4-safe)
+# 🚀 Laravel Multi-Domain Deploy Script (v1.4-safe+)
 # Author        : Nasrul Muiz
-# Version       : 1.4-safe
-# Description   : Safe deploy multi Laravel apps with auto-update
+# Version       : 1.4-safe+
+# Description   : Safe deploy multi Laravel apps with rollback, multi-PHP, SSL, optimizations
 # ==============================================
 
 set -e
+trap 'log_error "Deployment interrupted! Initiating rollback..."; rollback; exit 1' INT TERM
 
 # ----------------------------
 # Config & Defaults
@@ -22,6 +23,7 @@ DEFAULT_PHP="7.4"
 PHP_EXTENSIONS=(curl gd mbstring xml zip bcmath json)
 COMPOSER_BIN="/usr/local/bin/composer"
 CERTBOT_BIN="/usr/bin/certbot"
+ROLLBACK_DIR="/var/backups/rollback"
 
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
@@ -37,30 +39,41 @@ for arg in "$@"; do [[ "$arg" == "--silent" ]] && SILENT_MODE=1; done
 # Helper functions
 # ----------------------------
 log() { echo -e "$(date '+%F %T') | $1" | tee -a "$LOG_FILE"; }
-log_error() { log "${RED}ERROR: $1${NC}"; }
-log_success() { log "${GREEN}SUCCESS: $1${NC}"; }
+log_error() { log "${RED}ERROR: $1${NC}"; send_telegram "❌ ERROR: $1"; }
+log_success() { log "${GREEN}SUCCESS: $1${NC}"; send_telegram "✅ SUCCESS: $1"; }
 log_warning() { log "${YELLOW}WARNING: $1${NC}"; }
+
 prompt() { [[ $SILENT_MODE -eq 1 ]] && echo "$2" || { read -rp "$1" input; echo "${input:-$2}"; }; }
 
-send_telegram() {
+send_telegram() { 
     [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]] && return
     local msg="$1"
     curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
         -d chat_id="$TELEGRAM_CHAT_ID" -d text="$msg" -d parse_mode=Markdown >> "$LOG_FILE" 2>&1
 }
 
+rollback() {
+    [[ -d "$ROLLBACK_DIR" ]] || return
+    log_warning "Restoring apps from rollback..."
+    for dir in "$ROLLBACK_DIR"/*/; do
+        app=$(basename "$dir")
+        rm -rf "$WWW_DIR/$app"
+        cp -r "$dir" "$WWW_DIR/$app"
+        log "Rolled back $app"
+    done
+    systemctl restart nginx
+    for php_service in $(systemctl list-units --type=service | grep -Po 'php[0-9\.]+-fpm(?=\.service)'); do
+        systemctl restart "$php_service"
+    done
+    log_warning "Rollback completed."
+}
+
 backup_app() {
     local app="$1"; local app_path="$WWW_DIR/$app"; local backup_path="$BACKUP_DIR/$app/$(date +%Y%m%d_%H%M%S)"
     [[ -d "$app_path" ]] || return
     mkdir -p "$backup_path"
-    cp -r "$app_path" "$backup_path/" 2>/dev/null || true
-    if [[ -f "$app_path/.env" ]]; then
-        DB_DATABASE=$(grep -E '^DB_DATABASE=' "$app_path/.env" | cut -d '=' -f2-)
-        DB_USERNAME=$(grep -E '^DB_USERNAME=' "$app_path/.env" | cut -d '=' -f2-)
-        DB_PASSWORD=$(grep -E '^DB_PASSWORD=' "$app_path/.env" | cut -d '=' -f2-)
-        [[ -n "$DB_DATABASE" && -n "$DB_USERNAME" ]] && \
-            mysqldump -u "$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" > "$backup_path/database.sql" 2>/dev/null || true
-    fi
+    cp -r "$app_path" "$backup_path/"
+    find "$app_path" -type f -exec sha256sum {} \; > "$backup_path/checksum.sha256"
     log_success "Backup created for $app: $backup_path"
 }
 
@@ -94,6 +107,7 @@ auto_update_script() {
     log "Checking for script updates..."
     tmp=$(mktemp); curl -fsSL "$SCRIPT_REPO" -o "$tmp"
     if ! cmp -s "$tmp" "$SCRIPT_PATH"; then
+        cp "$SCRIPT_PATH" "$SCRIPT_PATH.bak.$(date +%Y%m%d_%H%M%S)"
         cp "$tmp" "$SCRIPT_PATH"
         chmod +x "$SCRIPT_PATH"
         log_success "Script updated to latest version from GitHub."
@@ -111,9 +125,9 @@ auto_update_script
 # ----------------------------
 # Base deployment
 # ----------------------------
-log "🌟 Laravel Multi-Domain Deploy v1.4-safe"
+log "🌟 Laravel Multi-Domain Deploy v1.4-safe+"
 [[ $SILENT_MODE -eq 1 ]] && log "🤖 Silent mode" || log "🎨 Visual mode"
-mkdir -p "$BACKUP_DIR"
+mkdir -p "$BACKUP_DIR" "$ROLLBACK_DIR"
 apt update -y >> "$LOG_FILE" 2>&1
 apt install -y nginx mariadb-server unzip curl git php-cli >> "$LOG_FILE" 2>&1
 
@@ -131,6 +145,8 @@ log "📦 Found ${#APPS[@]} apps: ${APPS[*]:-None}"
 # Deploy apps
 for APP in "${APPS[@]}"; do
     APP_PATH="$WWW_DIR/$APP"; mkdir -p "$APP_PATH"; log "🚀 Deploying $APP"; backup_app "$APP"
+    cp -r "$APP_PATH" "$ROLLBACK_DIR/$APP" 2>/dev/null || true
+
     [[ ! -f "$APP_PATH/artisan" ]] && { log "Installing Laravel for $APP..."; composer create-project laravel/laravel "$APP_PATH" >> "$LOG_FILE" 2>&1; }
 
     PHP_VERSION=$(prompt "PHP version for $APP [$DEFAULT_PHP]: " "$DEFAULT_PHP")
@@ -180,6 +196,11 @@ EOF
         php "$APP_PATH/artisan" key:generate >> "$LOG_FILE" 2>&1
     fi
 
+    # Laravel optimizations
+    php "$APP_PATH/artisan" config:cache >> "$LOG_FILE" 2>&1 || true
+    php "$APP_PATH/artisan" route:cache >> "$LOG_FILE" 2>&1 || true
+    php "$APP_PATH/artisan" view:cache >> "$LOG_FILE" 2>&1 || true
+
     # Nginx config only if missing
     VHOST_FILE="/etc/nginx/sites-available/$APP.conf"
     if [[ ! -f "$VHOST_FILE" ]]; then
@@ -189,12 +210,21 @@ server {
     server_name $DOMAIN;
     root $APP_PATH/public;
     index index.php index.html index.htm;
+    add_header X-Frame-Options "SAMEORIGIN";
+    add_header X-Content-Type-Options "nosniff";
+    add_header X-XSS-Protection "1; mode=block";
     location / { try_files \$uri \$uri/ /index.php?\$query_string; }
     location ~ \.php\$ { include snippets/fastcgi-php.conf; fastcgi_pass unix:/var/run/php/php${PHP_VERSION}-fpm.sock; }
     location ~ /\.ht { deny all; }
+    client_max_body_size 100M;
 }
 EOF
         ln -sf "$VHOST_FILE" "/etc/nginx/sites-enabled/$APP.conf"
+    fi
+
+    # SSL provisioning
+    if [[ "$DOMAIN" != "*" && "$DOMAIN" != "$APP.local" ]]; then
+        certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --email admin@$DOMAIN >> "$LOG_FILE" 2>&1 || log_warning "SSL issue for $DOMAIN"
     fi
 
     # Telegram notification
@@ -203,14 +233,13 @@ EOF
 done
 
 # Validate & restart
-nginx -t >> "$LOG_FILE" 2>&1 && log_success "Nginx config OK" || { log_error "Nginx config error"; exit 1; }
+nginx -t >> "$LOG_FILE" 2>&1 && log_success "Nginx config OK" || { log_error "Nginx config error"; rollback; exit 1; }
 systemctl restart nginx
 for php_service in $(systemctl list-units --type=service | grep -Po 'php[0-9\.]+-fpm(?=\.service)'); do systemctl restart "$php_service"; done
 
 # Cron SSL renewal
 (crontab -l 2>/dev/null; echo "30 2 * * * $CERTBOT_BIN renew --quiet >> $LOG_FILE 2>&1") | crontab -
 
-# Deployment summary
 log_success "🎉 All deployments completed!"
 [[ $SILENT_MODE -eq 0 ]] && echo -e "\n${GREEN}✅ Deployment Summary:${NC}"
 for APP in "${APPS[@]}"; do
