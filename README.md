@@ -55,14 +55,14 @@ This script allows **automatic deployment of multiple Laravel applications** on 
 ### Non-Silent / Interactive Mode
 
 ```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/username/laravel-deploy/main/deploy_laravel.sh)"
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/nasrulll/laravel-deploy/main/deploy_laravel.sh)"
 Script will show prompts, emoji, and PHP/SSL options
 
 Recommended for first-time deployment or testing
 
 ## Silent / Ultra-Automated Mode
 
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/username/laravel-deploy/main/deploy_laravel.sh)" -- --silent >> /var/log/laravel_ultra_deploy.log 2>&1
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/nasrulll/laravel-deploy/main/deploy_laravel.sh)" -- --silent >> /var/log/laravel_ultra_deploy.log 2>&1
 
 Auto detects all options
 
