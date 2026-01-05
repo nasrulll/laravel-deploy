@@ -60,10 +60,10 @@ Script will show prompts, emoji, and PHP/SSL options
 
 Recommended for first-time deployment or testing
 
-Silent / Ultra-Automated Mode
-bash
-Copy code
+## Silent / Ultra-Automated Mode
+
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/username/laravel-deploy/main/deploy_laravel.sh)" -- --silent >> /var/log/laravel_ultra_deploy.log 2>&1
+
 Auto detects all options
 
 Full logging at /var/log/laravel_ultra_deploy.log
@@ -80,10 +80,9 @@ User automatically created: appname_user
 Random password, displayed in terminal (non-silent mode)
 
 ⚙️ Nginx Virtual Hosts
+
 Script automatically generates a virtual host per app:
 
-swift
-Copy code
 /etc/nginx/sites-available/<appname>.conf
 /etc/nginx/sites-enabled/<appname>.conf
 Default domain: <appname>.local
@@ -91,32 +90,32 @@ Default domain: <appname>.local
 Can be customized as needed
 
 🔧 Permission Fix
+
 Script automatically sets permissions for WinSCP / FTP uploads:
 
-bash
-Copy code
 chown -R www-data:www-data /var/www/<app>
 chmod -R 775 /var/www/<app>/storage /var/www/<app>/bootstrap/cache
+
+
 📂 Repository Structure
-bash
-Copy code
+
 laravel-deploy/
 ├─ deploy_laravel.sh      # Main deployment script
 ├─ README.md              # Documentation
 └─ .gitignore             # Optional
+
 📝 Tips
 To always use the latest script version, run directly via curl:
 
-bash
-Copy code
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/username/laravel-deploy/main/deploy_laravel.sh)" -- --silent
+
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/nasrulll/laravel-deploy/main/deploy_laravel.sh)" -- --silent
+
 To auto-update Laravel apps, make sure they are git repositories and include git pull in the script.
 
 Logging for silent mode: /var/log/laravel_ultra_deploy.log
 
 🎨 Visual / Emoji Example
-arduino
-Copy code
+
 🚀 Deploying App1
 💻 Installing dependencies...
 🗄️ Creating database app1_db
@@ -124,6 +123,8 @@ Copy code
 🌐 Creating Nginx config...
 🎉 Deployment Completed!
 🤝 Contributing
+
+
 Fork the repository
 
 Add new features / fixes
