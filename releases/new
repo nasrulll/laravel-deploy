@@ -1,0 +1,16 @@
+gh release create v5.0.0 \
+  --title "Laravel Deploy v5.0.0" \
+  --notes "## 🎉 Initial Release
+
+Complete Laravel deployment solution with 6 core features:
+
+1. ✅ Server provisioning automation
+2. ✅ Multi-application support  
+3. ✅ Basic deployment pipeline
+4. ✅ Database management
+5. ✅ SSL certificate management
+6. ✅ Backup system
+
+### Installation
+```bash
+curl -sSL https://raw.githubusercontent.com/nasrulll/laravel-deploy/main/scripts/install.sh | sudo bash -s -- --install
