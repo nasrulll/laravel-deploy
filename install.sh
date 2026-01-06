@@ -48,7 +48,7 @@ log "🚀 Installing Laravel Deploy Pro v$VERSION"
 # Download main script
 log "Downloading script..."
 curl -sSL -o /tmp/laravel-deploy.sh \
-  "$REPO_URL/raw/main/laravel-deploy.sh"
+  "https://raw.githubusercontent.com/nasrulll/laravel-deploy/main/laravel-deploy.sh"
 
 # Make executable
 chmod +x /tmp/laravel-deploy.sh
