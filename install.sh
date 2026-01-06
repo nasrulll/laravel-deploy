@@ -7,6 +7,7 @@
 # Description   : One-line installer for Laravel Deploy
 # ==============================================
 
+
 set -e
 
 # Colors
