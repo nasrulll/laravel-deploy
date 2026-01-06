@@ -66,19 +66,26 @@ log_success() { log "SUCCESS" "$1"; }
 log_warning() { log "WARNING" "$1"; }
 log_error() { log "ERROR" "$1"; }
 
-spinner() {
-    local pid=$1
-    local delay=0.1
-    local spinstr='|/-\'
+validate_input() {
+    local input="$1"
+    local pattern="$2"
+    local description="$3"
     
-    while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
-        local temp=${spinstr#?}
-        printf " [%c]  " "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-        printf "\b\b\b\b\b\b"
-    done
-    printf "    \b\b\b\b"
+    if [[ ! $input =~ $pattern ]]; then
+        log_error "Invalid input for $description: $input"
+        return 1
+    fi
+    return 0
+}
+
+detect_os() {
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        echo "$ID"
+    else
+        log_error "Cannot detect OS"
+        exit 1
+    fi
 }
 
 # ----------------------------
@@ -87,16 +94,23 @@ spinner() {
 provision_server() {
     log_info "🚀 Starting server provisioning..."
     
-    # Detect OS
-    if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        OS=$ID
-        VERSION=$VERSION_ID
-        log_info "Detected: $NAME $VERSION"
-    else
-        log_error "Cannot detect OS"
-        exit 1
-    fi
+    local os=$(detect_os)
+    
+    case $os in
+        ubuntu|debian)
+            provision_debian_based
+            ;;
+        *)
+            log_error "Unsupported OS: $os. Currently only Ubuntu/Debian are supported."
+            exit 1
+            ;;
+    esac
+    
+    log_success "✅ Server provisioning completed!"
+}
+
+provision_debian_based() {
+    log_info "Detected Debian-based system. Starting provisioning..."
     
     # Update system
     log_info "Updating system packages..."
@@ -116,30 +130,10 @@ provision_server() {
     apt install -y mariadb-server mariadb-client
     
     # Secure MariaDB installation
-    log_info "Securing MariaDB..."
-    mysql_secure_installation <<EOF
-
-y
-${CONFIG[MYSQL_ROOT_PASS]}
-${CONFIG[MYSQL_ROOT_PASS]}
-y
-y
-y
-y
-EOF
+    secure_mariadb
     
     # Install PHP and extensions
-    log_info "Installing PHP ${CONFIG[PHP_VERSION]} and extensions..."
-    add-apt-repository -y ppa:ondrej/php
-    apt update
-    
-    apt install -y php${CONFIG[PHP_VERSION]} php${CONFIG[PHP_VERSION]}-fpm \
-        php${CONFIG[PHP_VERSION]}-mysql php${CONFIG[PHP_VERSION]}-curl \
-        php${CONFIG[PHP_VERSION]}-gd php${CONFIG[PHP_VERSION]}-mbstring \
-        php${CONFIG[PHP_VERSION]}-xml php${CONFIG[PHP_VERSION]}-zip \
-        php${CONFIG[PHP_VERSION]}-bcmath php${CONFIG[PHP_VERSION]}-intl \
-        php${CONFIG[PHP_VERSION]}-redis php${CONFIG[PHP_VERSION]}-memcached \
-        php${CONFIG[PHP_VERSION]}-opcache php${CONFIG[PHP_VERSION]}-imagick
+    install_php
     
     # Install Composer
     log_info "Installing Composer..."
@@ -163,6 +157,72 @@ EOF
     npm install -g pm2
     
     # Configure PHP-FPM
+    configure_php_fpm
+    
+    # Configure Nginx
+    configure_nginx
+    
+    # Enable services
+    log_info "Enabling services..."
+    systemctl enable nginx
+    systemctl enable php${CONFIG[PHP_VERSION]}-fpm
+    systemctl enable mariadb
+    
+    # Start services
+    log_info "Starting services..."
+    systemctl restart nginx
+    systemctl restart php${CONFIG[PHP_VERSION]}-fpm
+    systemctl restart mariadb
+    
+    # Configure firewall
+    configure_firewall
+    
+    # Create directories
+    log_info "Creating required directories..."
+    mkdir -p "${CONFIG[WWW_DIR]}" "$BACKUP_ROOT" "$DEPLOYMENTS_ROOT" "$SSL_DIR" \
+        /var/log/laravel-deploy /etc/laravel-deploy
+    
+    # Set permissions
+    chmod 755 "${CONFIG[WWW_DIR]}"
+    chmod 750 "$BACKUP_ROOT"
+    
+    # Save configuration
+    save_configuration
+}
+
+secure_mariadb() {
+    log_info "Securing MariaDB..."
+    # Check if MySQL root password is set in config
+    local root_pass="${CONFIG[MYSQL_ROOT_PASS]}"
+    if [[ -z "$root_pass" ]]; then
+        root_pass=$(openssl rand -base64 32)
+        CONFIG[MYSQL_ROOT_PASS]="$root_pass"
+    fi
+    
+    # Run secure installation non-interactively
+    mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$root_pass';"
+    mysql -u root -p"$root_pass" -e "DELETE FROM mysql.user WHERE User='';"
+    mysql -u root -p"$root_pass" -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');"
+    mysql -u root -p"$root_pass" -e "DROP DATABASE IF EXISTS test;"
+    mysql -u root -p"$root_pass" -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
+    mysql -u root -p"$root_pass" -e "FLUSH PRIVILEGES;"
+}
+
+install_php() {
+    log_info "Installing PHP ${CONFIG[PHP_VERSION]} and extensions..."
+    add-apt-repository -y ppa:ondrej/php
+    apt update
+    
+    apt install -y php${CONFIG[PHP_VERSION]} php${CONFIG[PHP_VERSION]}-fpm \
+        php${CONFIG[PHP_VERSION]}-mysql php${CONFIG[PHP_VERSION]}-curl \
+        php${CONFIG[PHP_VERSION]}-gd php${CONFIG[PHP_VERSION]}-mbstring \
+        php${CONFIG[PHP_VERSION]}-xml php${CONFIG[PHP_VERSION]}-zip \
+        php${CONFIG[PHP_VERSION]}-bcmath php${CONFIG[PHP_VERSION]}-intl \
+        php${CONFIG[PHP_VERSION]}-redis php${CONFIG[PHP_VERSION]}-memcached \
+        php${CONFIG[PHP_VERSION]}-opcache php${CONFIG[PHP_VERSION]}-imagick
+}
+
+configure_php_fpm() {
     log_info "Configuring PHP-FPM..."
     cat > /etc/php/${CONFIG[PHP_VERSION]}/fpm/pool.d/laravel.conf << EOF
 [laravel]
@@ -180,8 +240,9 @@ pm.max_requests = 500
 slowlog = /var/log/php-fpm/laravel-slow.log
 request_slowlog_timeout = 5s
 EOF
-    
-    # Configure Nginx
+}
+
+configure_nginx() {
     log_info "Configuring Nginx..."
     cat > /etc/nginx/nginx.conf << 'NGINX'
 user www-data;
@@ -243,20 +304,9 @@ http {
     include /etc/nginx/sites-enabled/*;
 }
 NGINX
-    
-    # Enable services
-    log_info "Enabling services..."
-    systemctl enable nginx
-    systemctl enable php${CONFIG[PHP_VERSION]}-fpm
-    systemctl enable mariadb
-    
-    # Start services
-    log_info "Starting services..."
-    systemctl restart nginx
-    systemctl restart php${CONFIG[PHP_VERSION]}-fpm
-    systemctl restart mariadb
-    
-    # Configure firewall
+}
+
+configure_firewall() {
     log_info "Configuring firewall..."
     if command -v ufw &> /dev/null; then
         ufw allow ssh
@@ -264,20 +314,6 @@ NGINX
         ufw allow https
         ufw --force enable
     fi
-    
-    # Create directories
-    log_info "Creating required directories..."
-    mkdir -p "${CONFIG[WWW_DIR]}" "$BACKUP_ROOT" "$DEPLOYMENTS_ROOT" "$SSL_DIR" \
-        /var/log/laravel-deploy /etc/laravel-deploy
-    
-    # Set permissions
-    chmod 755 "${CONFIG[WWW_DIR]}"
-    chmod 750 "$BACKUP_ROOT"
-    
-    log_success "✅ Server provisioning completed!"
-    
-    # Save configuration
-    save_configuration
 }
 
 # ----------------------------
@@ -316,6 +352,37 @@ scan_applications() {
     echo "${apps[@]}"
 }
 
+detect_php_version() {
+    local app_path="$1"
+    local default_version="${CONFIG[PHP_VERSION]}"
+    
+    # Check .env file
+    if [[ -f "$app_path/.env" ]]; then
+        local env_version=$(grep -E '^PHP_VERSION=' "$app_path/.env" | cut -d'=' -f2)
+        [[ -n "$env_version" ]] && echo "$env_version" && return
+    fi
+    
+    # Check composer.json
+    if [[ -f "$app_path/composer.json" ]]; then
+        local composer_php=$(grep -o '"php":"[^"]*' "$app_path/composer.json" | cut -d'"' -f4)
+        
+        # Extract major.minor version
+        if [[ "$composer_php" =~ ([0-9]+\.[0-9]+) ]]; then
+            local version="${BASH_REMATCH[1]}"
+            
+            # Map to available versions
+            case "$version" in
+                7.4|8.0|8.1|8.2|8.3)
+                    echo "$version"
+                    return
+                    ;;
+            esac
+        fi
+    fi
+    
+    echo "$default_version"
+}
+
 create_app_config() {
     local app_name="$1"
     local app_path="$2"
@@ -348,37 +415,6 @@ DEPLOYMENT_HOOKS_ENABLED=1
 EOF
         log_info "Created configuration for $app_name"
     fi
-}
-
-detect_php_version() {
-    local app_path="$1"
-    local default_version="${CONFIG[PHP_VERSION]}"
-    
-    # Check .env file
-    if [[ -f "$app_path/.env" ]]; then
-        local env_version=$(grep -E '^PHP_VERSION=' "$app_path/.env" | cut -d'=' -f2)
-        [[ -n "$env_version" ]] && echo "$env_version" && return
-    fi
-    
-    # Check composer.json
-    if [[ -f "$app_path/composer.json" ]]; then
-        local composer_php=$(grep -o '"php":"[^"]*' "$app_path/composer.json" | cut -d'"' -f4)
-        
-        # Extract major.minor version
-        if [[ "$composer_php" =~ ([0-9]+\.[0-9]+) ]]; then
-            local version="${BASH_REMATCH[1]}"
-            
-            # Map to available versions
-            case "$version" in
-                7.4|8.0|8.1|8.2|8.3)
-                    echo "$version"
-                    return
-                    ;;
-            esac
-        fi
-    fi
-    
-    echo "$default_version"
 }
 
 deploy_multiple_apps() {
@@ -555,6 +591,15 @@ update_code_git() {
     log_info "Deployed commit: $commit_hash - $commit_msg"
     
     return 0
+}
+
+update_code_rsync() {
+    local app_path="$1"
+    local source="$2"
+    
+    log_info "Syncing code from $source to $app_path"
+    rsync -avz --delete --exclude='.env' --exclude='storage' "$source/" "$app_path/"
+    return $?
 }
 
 install_dependencies() {
@@ -754,12 +799,12 @@ setup_database() {
     log_info "Setting up database: $DB_NAME"
     
     # Create database
-    mysql -u root -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+    mysql -u root -p"${CONFIG[MYSQL_ROOT_PASS]}" -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
     
     # Create user with privileges
-    mysql -u root -e "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASSWORD';"
-    mysql -u root -e "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';"
-    mysql -u root -e "FLUSH PRIVILEGES;"
+    mysql -u root -p"${CONFIG[MYSQL_ROOT_PASS]}" -e "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASSWORD';"
+    mysql -u root -p"${CONFIG[MYSQL_ROOT_PASS]}" -e "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';"
+    mysql -u root -p"${CONFIG[MYSQL_ROOT_PASS]}" -e "FLUSH PRIVILEGES;"
     
     # Update .env file
     if [[ -f "$app_path/.env" ]]; then
@@ -1516,6 +1561,29 @@ contains() {
         [[ "$element" == "$item" ]] && return 0
     done
     return 1
+}
+
+encrypt_backup() {
+    local backup_dir="$1"
+    local key="$2"
+    
+    log_info "Encrypting backup..."
+    
+    # Encrypt database backup
+    if [[ -f "$backup_dir/database.sql.gz" ]]; then
+        openssl enc -aes-256-cbc -salt -in "$backup_dir/database.sql.gz" \
+            -out "$backup_dir/database.sql.gz.enc" -pass pass:"$key"
+        rm "$backup_dir/database.sql.gz"
+    fi
+    
+    # Encrypt files backup
+    if [[ -f "$backup_dir/files.tar.gz" ]]; then
+        openssl enc -aes-256-cbc -salt -in "$backup_dir/files.tar.gz" \
+            -out "$backup_dir/files.tar.gz.enc" -pass pass:"$key"
+        rm "$backup_dir/files.tar.gz"
+    fi
+    
+    log_info "Backup encrypted"
 }
 
 # ----------------------------
